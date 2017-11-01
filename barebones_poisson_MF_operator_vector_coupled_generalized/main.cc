@@ -485,6 +485,7 @@ namespace matFreePoisson
         std::vector<const ConstraintMatrix *> constraints_vector;
         IndexSet                         locally_relevant_dofs, locally_relevant_dofs_phi, locally_relevant_dofs_c;
         SystemMatrixType                 system_matrix;
+        std_cxx11::shared_ptr<MatrixFree<dim,double> > system_mf_storage;
         vectorType                       Source_Term, Phi, C;
         vectorType_primative            invM;
         double                           setup_time;
@@ -517,6 +518,7 @@ namespace matFreePoisson
     dof_handler (triangulation),
     dof_handler_phi (triangulation),
     dof_handler_c (triangulation),
+    system_mf_storage(new MatrixFree<dim,double>()),
     pcout (std::cout, Utilities::MPI::this_mpi_process(MPI_COMM_WORLD)==0)
     {}
 
@@ -628,8 +630,6 @@ namespace matFreePoisson
         additional_data.mapping_update_flags = ( update_values | update_gradients | update_JxW_values |
             update_quadrature_points);
 
-        std_cxx11::shared_ptr<MatrixFree<dim,double> > system_mf_storage(new MatrixFree<dim,double>());
-
         system_mf_storage->reinit (dof_vector, constraints_vector, QGauss<1>(fe_vector.degree+1),additional_data);
 
         system_matrix.initialize (system_mf_storage);
@@ -711,7 +711,7 @@ namespace matFreePoisson
                 mat2.evaluate (true,true,false);
                 for (unsigned int q=0; q<mat2.n_q_points; ++q){
                     mat2.submit_value(mat2.get_value(q)+make_vectorized_array(0.0),q);
-                    mat2.submit_gradient(-make_vectorized_array(0.001)*mat2.get_gradient(q),q);
+                    mat2.submit_gradient(-make_vectorized_array(0.0001)*mat2.get_gradient(q),q);
                 }
                 mat2.integrate (true,true);
                 mat2.distribute_local_to_global (dst.block(1));
@@ -754,30 +754,25 @@ namespace matFreePoisson
     template <int dim>
     void PoissonProblem<dim>::solve () {
 
-
-        std::vector<unsigned int> selected_row_blocks;
-        typename MatrixFree<dim,double>::AdditionalData additional_data;
-        additional_data.tasks_parallel_scheme = MatrixFree<dim,double>::AdditionalData::partition_partition;
-        additional_data.mapping_update_flags = ( update_values | update_gradients | update_JxW_values |
-            update_quadrature_points);
-        std_cxx11::shared_ptr<MatrixFree<dim,double> > system_mf_storage(new MatrixFree<dim,double>());
-        system_mf_storage->reinit (dof_vector, constraints_vector, QGauss<1>(fe_vector.degree+1),additional_data);
-
         Timer time;
         char buffer[200];
+
+
+        system_matrix.clear();
+        system_matrix.initialize (system_mf_storage);
+        pcout << "time reinitializing the operator: " << time.wall_time() << "s" <<std::endl;
 
         // First calculate the RHS
         Source_Term = 0.0;
         system_matrix.get_matrix_free()->cell_loop(&PoissonProblem::local_apply_rhs,this,Source_Term,Phi);
 
         // Take explicit time step (ignoring invM for now)
+        invM = 0.0;
         calc_invM(invM);
         Source_Term.block(1).scale(invM);
         Phi.block(1) = Source_Term.block(1);
 
-
-
-        selected_row_blocks.clear();
+        std::vector<unsigned int> selected_row_blocks;
         selected_row_blocks.push_back(0);
         system_matrix.initialize (system_mf_storage,selected_row_blocks);
 
@@ -885,8 +880,13 @@ namespace matFreePoisson
 
         setup_system();
         output_results(0);
-        solve ();
-        output_results (1);
+        for (unsigned int step=0; step<100; step++){
+            solve ();
+            if (step%10 == 0){
+                output_results (step);
+            }
+            Phi.block(0).add(0.01); // perturb phi by a little bit so that the solve has to work every time step
+        }
 
         pcout << "Total  time    "  << time.wall_time() << "s" << std::endl;
     }
