@@ -4,7 +4,6 @@
 #include <deal.II/base/logstream.h>
 #include <deal.II/base/timer.h>
 #include <deal.II/lac/vector.h>
-#include <deal.II/lac/full_matrix.h>
 #include <deal.II/lac/solver_cg.h>
 #include <deal.II/lac/precondition.h>
 #include <deal.II/fe/fe_q.h>
@@ -26,9 +25,8 @@
 #include <fstream>
 #include <sstream>
 
-
 //factor of 5 is 32 elements in 3D, h=0.032
-#define refineFactor 8
+#define refineFactor 7
 #define pi (2.0*std::acos(0.0))
 
 typedef dealii::parallel::distributed::Vector<double> vectorType;
@@ -106,19 +104,27 @@ namespace matFreePoisson
         number el (const unsigned int row, const unsigned int col) const;
         void set_diagonal (const vectorType &diagonal);
         std::size_t memory_consumption () const;
-        vectorType *X;
-        vectorType invM;
+        void intialize_vector(vectorType &);
+
+        void compute_diagonal();
 
         SourceTerm<dim> source_term;
 
     private:
+        vectorType matrix_diagonal;
+
         void local_apply (const MatrixFree<dim,number> &data, vectorType &dst,
             const vectorType &src,
             const std::pair<unsigned int,unsigned int> &cell_range) const;
-            void local_apply_rhs (const MatrixFree<dim,number> &data, vectorType &dst,
-                const vectorType &src,
-                const std::pair<unsigned int,unsigned int> &cell_range) const;
-                MatrixFree<dim,number>      data;
+        void local_apply_rhs (const MatrixFree<dim,number> &data, vectorType &dst,
+            const vectorType &src,
+            const std::pair<unsigned int,unsigned int> &cell_range) const;
+        MatrixFree<dim,number>      data;
+
+        void local_diagonal_cell (const MatrixFree<dim,number>            &data,
+            vectorType                                  &dst,
+            const unsigned int &,
+            const std::pair<unsigned int,unsigned int>  &cell_range) const;
     };
 
     // -----------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -163,30 +169,17 @@ namespace matFreePoisson
         additional_data.mpi_communicator = MPI_COMM_WORLD;
         additional_data.tasks_parallel_scheme = MatrixFree<dim,number>::AdditionalData::partition_partition;
         additional_data.mapping_update_flags = (update_values | update_gradients | update_JxW_values | update_quadrature_points);
-        QGaussLobatto<1> quadrature (fe_degree+1);
+        //QGaussLobatto<1> quadrature (fe_degree+1);
+        QGauss<1> quadrature (fe_degree+1);  // Question: Why doesn't this have to match the quadrature rule below?
         data.reinit (dof_handler, constraint, quadrature, additional_data);
+    }
 
-        //Compute  invM
-        data.initialize_dof_vector (invM);
-        VectorizedArray<double> one = make_vectorized_array (1.0);
-        //Select gauss lobatto quad points which are suboptimal but give diogonal M
-        FEEvaluation<dim,fe_degree> fe_eval(data);
-        const unsigned int            n_q_points = fe_eval.n_q_points;
-        for (unsigned int cell=0; cell<data.n_macro_cells(); ++cell)
-        {
-            fe_eval.reinit(cell);
-            for (unsigned int q=0; q<n_q_points; ++q)
-            fe_eval.submit_value(one,q);
-            fe_eval.integrate (true,false);
-            fe_eval.distribute_local_to_global (invM);
-        }
-        invM.compress(VectorOperation::add);
-        //
-        for (unsigned int k=0; k<invM.local_size(); ++k)
-        if (std::abs(invM.local_element(k))>1e-15)
-        invM.local_element(k) = 1./invM.local_element(k);
-        else
-        invM.local_element(k) = 0;
+    // -----------------------------------------------------------------------------------------------------------------------------------------------------------
+    // Public method to intialize a vector using the matrix free object (a private member of the PoissonOperator class)
+    // -----------------------------------------------------------------------------------------------------------------------------------------------------------
+    template <int dim, int fe_degree, typename number>
+    void PoissonOperator<dim,fe_degree,number>::intialize_vector (vectorType &vec){
+        data.initialize_dof_vector(vec);
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -240,7 +233,7 @@ namespace matFreePoisson
         }
 
     // -----------------------------------------------------------------------------------------------------------------------------------------------------------
-    // Matrix free data structure vmult operations. (STILL NEEDS TO BE MODIFIED!)
+    // Matrix free data structure vmult operations.
     // -----------------------------------------------------------------------------------------------------------------------------------------------------------
     template <int dim, int fe_degree, typename number>
     void PoissonOperator<dim,fe_degree,number>::vmult (vectorType &dst, const vectorType &src) const
@@ -272,6 +265,60 @@ namespace matFreePoisson
         data.cell_loop (&PoissonOperator::local_apply_rhs, this, dst, src);
     }
 
+    // -----------------------------------------------------------------------------------------------------------------------------------------------------------
+    // Compute the diagonal
+    // -----------------------------------------------------------------------------------------------------------------------------------------------------------
+    template <int dim, int fe_degree, typename number>
+    void PoissonOperator<dim,fe_degree,number>::compute_diagonal ()
+    {
+        // typedef typename Base<dim,VectorType>::value_type Number;
+        // Assert((Base<dim, VectorType>::data.get() != NULL), ExcNotInitialized());
+        //
+        // unsigned int dummy = 0;
+        // this->inverse_diagonal_entries.
+        // reset(new DiagonalMatrix<VectorType>());
+        // VectorType &inverse_diagonal_vector = this->inverse_diagonal_entries->get_vector();
+        // this->initialize_dof_vector(inverse_diagonal_vector);
+        //
+        // this->data->cell_loop (&LaplaceOperator::local_diagonal_cell,
+        //     this, inverse_diagonal_vector, dummy);
+        //     this->set_constrained_entries_to_one(inverse_diagonal_vector);
+        //
+        // for (unsigned int i=0; i<inverse_diagonal_vector.local_size(); ++i)
+        //     if (std::abs(inverse_diagonal_vector.local_element(i)) > std::sqrt(std::numeric_limits<Number>::epsilon()))
+        //         inverse_diagonal_vector.local_element(i) = 1./inverse_diagonal_vector.local_element(i);
+        //     else
+        //         inverse_diagonal_vector.local_element(i) = 1.;
+        //
+        // inverse_diagonal_vector.update_ghost_values();
+    }
+
+    template <int dim, int fe_degree, typename number>
+    void PoissonOperator<dim,fe_degree,number>::local_diagonal_cell (const MatrixFree<dim,number> &data,
+            vectorType                                       &dst,
+            const unsigned int &,
+            const std::pair<unsigned int,unsigned int>       &cell_range) const {
+
+            // typedef typename Base<dim,VectorType>::value_type Number;
+            // FEEvaluation<dim,fe_degree,n_q_points_1d,n_components,Number> phi (data, this->selected_rows[0]);
+            // for (unsigned int cell=cell_range.first; cell<cell_range.second; ++cell)
+            // {
+            //     phi.reinit (cell);
+            //     VectorizedArray<Number> local_diagonal_vector[phi.tensor_dofs_per_cell];
+            //     for (unsigned int i=0; i<phi.dofs_per_cell; ++i)
+            //     {
+            //         for (unsigned int j=0; j<phi.dofs_per_cell; ++j)
+            //         phi.begin_dof_values()[j] = VectorizedArray<Number>();
+            //         phi.begin_dof_values()[i] = 1.;
+            //         do_operation_on_cell(phi,cell);
+            //         local_diagonal_vector[i] = phi.begin_dof_values()[i];
+            //     }
+            //     for (unsigned int i=0; i<phi.tensor_dofs_per_cell; ++i)
+            //     phi.begin_dof_values()[i] = local_diagonal_vector[i];
+            //     phi.distribute_local_to_global (dst);
+            //}
+        }
+
     // ===========================================================================================================================================================
     // Now the actual Poisson Class
     // ===========================================================================================================================================================
@@ -283,6 +330,7 @@ namespace matFreePoisson
         void run ();
     private:
         typedef PoissonOperator<dim,degree_finite_element,double> SystemMatrixType;
+
         void setup_system ();
         void solve ();
         void output_results (const unsigned int cycle) const;
@@ -292,9 +340,8 @@ namespace matFreePoisson
         ConstraintMatrix                 constraints;
         IndexSet                         locally_relevant_dofs;
         SystemMatrixType                 system_matrix;
-        vectorType                       C0, Mu, X, X1, R, P, H, Source_Term, Phi;
+        vectorType                       Source_Term, Phi;
         double                           setup_time;
-        unsigned int                     increment;
         ConditionalOStream               pcout;
     };
 
@@ -305,7 +352,7 @@ namespace matFreePoisson
     PoissonProblem<dim>::PoissonProblem ()
     :
     triangulation (MPI_COMM_WORLD),
-    fe (QGaussLobatto<1>(degree_finite_element+1)),
+    fe (QGaussLobatto<1>(degree_finite_element+1)), // Question: Why doesn't this have to match the quadrature rule I put into the matrix free object? This is like Step 37 in this regard
     dof_handler (triangulation),
     pcout (std::cout, Utilities::MPI::this_mpi_process(MPI_COMM_WORLD)==0)
     {}
@@ -329,7 +376,7 @@ namespace matFreePoisson
 
         DoFTools::make_hanging_node_constraints (dof_handler, constraints);
 
-        //FIXME: Check Dirichlet BC
+        //FIXME: Check nonhomogenous Dirichlet BC
         VectorTools::interpolate_boundary_values (dof_handler, 0, ZeroFunction<dim>(), constraints);
         VectorTools::interpolate_boundary_values (dof_handler, 1, ZeroFunction<dim>(), constraints);
         constraints.close();
@@ -337,33 +384,29 @@ namespace matFreePoisson
         pcout << "Distribute DoFs & B.C.      "
         <<  time.wall_time() << "s" << std::endl;
         time.restart();
+
         //data structures
         system_matrix.reinit (dof_handler, constraints);
-        system_matrix.X=&X1;
         double memory=system_matrix.memory_consumption();
         memory=Utilities::MPI::sum(memory, MPI_COMM_WORLD);
         pcout  << "System matrix memory consumption:     "
         << memory*1e-6
         << " MB."
         << std::endl;
-        C0.reinit (system_matrix.invM);
-        Mu.reinit (C0);
-        X.reinit  (C0);
-        X1.reinit (C0);
-        R.reinit  (C0);
-        P.reinit  (C0);
-        H.reinit  (C0);
-        Source_Term.reinit  (C0);
-        Phi.reinit  (C0);
-        memory=C0.memory_consumption();
+
+        system_matrix.intialize_vector(Source_Term);
+        Phi.reinit  (Source_Term);
+        memory=Phi.memory_consumption();
         memory=Utilities::MPI::sum(memory, MPI_COMM_WORLD);
+
         pcout  << "Vector memory consumption:     "
         << 8*memory*1e-6
         << " MB."
         << std::endl;
+
         //Initial Condition
         VectorTools::interpolate (dof_handler,InitialCondition<dim> (1),Phi);
-        Mu=0.0; X=0.0;
+
         //timing
         setup_time += time.wall_time();
         pcout << "Setup matrix-free system:    "
@@ -440,9 +483,7 @@ namespace matFreePoisson
         typename Triangulation<dim>::cell_iterator
         cell = triangulation.begin (),
         endc = triangulation.end();
-
         for (; cell!=endc; ++cell){
-
             // Mark all of the faces
             for (unsigned int face_number=0; face_number<GeometryInfo<dim>::faces_per_cell;++face_number){
                 for (unsigned int i=0; i<dim; i++){
